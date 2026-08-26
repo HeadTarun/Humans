@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+sqlalchemy
+alembic
+asyncpg
+psycopg2-binary
+httpx
+python-dotenv
+groq
+email-validator
+beautifulsoup4
+tldextract
+dnspython
+pytest
+pytest-asyncio
