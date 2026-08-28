@@ -30,7 +30,7 @@ class InvestigationProfile(BaseContract):
     mandatory_tools: list[str] = Field(default_factory=list)
     optional_tools: list[str] = Field(default_factory=list)
     expensive_tools: list[str] = Field(default_factory=list)
-    min_level: InvestigationLevel = InvestigationLevel.L1_TRIAGE
+    min_level: InvestigationLevel = InvestigationLevel.L0_TRIAGE
 
 
 class PolicyAction(str, Enum):

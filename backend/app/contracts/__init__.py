@@ -62,10 +62,15 @@ from .investigation import (
     AttackHypothesisType,
     EscalationStatus,
     HypothesisStatus,
+    InvestigationBudget,
     InvestigationLevel,
     InvestigationState,
+    InvestigationStatus,
+    StateMachineStatus,
     StopReason,
+    ToolCostSpent,
 )
+from .result import InvestigationResult, RESOURCE_STOP_REASONS
 from .policy import (
     InvestigationProfile,
     PolicyAction,
@@ -98,45 +103,41 @@ from .groq import (
 )
 from .report import ForensicReport
 from .audit import AuditEventType, AuditRecord, GENESIS_HASH, compute_record_hash
+from .url_canonical import URLCanonical, URLCanonicalSet
+from .provider_result import ProviderResult
+from .domain_intel import DomainIntelResult
 
 __all__ = [
-    # common
     "BaseContract", "CaseId", "ConflictId", "ContractError", "CorrelationId",
     "EvidenceId", "ExecutionId", "HypothesisId", "Provenance", "Recommendation",
     "SourceType", "utcnow",
-    # evidence
     "EvidenceCategory", "EvidenceItem", "EvidenceStatus", "EvidenceType", "TrustLevel",
-    # headers / auth / relay / ioc
     "HeaderFinding", "HeaderSet", "ReceivedHop",
     "AuthenticationEvidence", "AuthResult",
     "RelayHop", "RelayPath",
     "IOC", "IOCType",
-    # url / html / attachment / email
     "URLRecord", "URLStructuralFeatures",
     "HTMLAnalysisResult", "HTMLFinding", "HTMLFindingType",
     "AttachmentRef",
     "ParsedEmail",
-    # ml
     "HeaderFeatures", "HeaderPrediction", "ModelTask", "NLPAnalysisResult",
     "NLPLabel", "Prediction", "URLPrediction",
-    # threat intel / historical / correlation
     "CacheStatus", "ThreatIntelProvider", "ThreatIntelResult", "ThreatIntelVerdict",
     "HistoricalMatch", "MatchType",
     "CorrelationLink", "CorrelationType",
-    # investigation
     "AttackHypothesis", "AttackHypothesisType", "EscalationStatus",
-    "HypothesisStatus", "InvestigationLevel", "InvestigationState", "StopReason",
-    # policy / tool
+    "HypothesisStatus", "InvestigationBudget", "InvestigationLevel",
+    "InvestigationState", "InvestigationStatus", "StateMachineStatus",
+    "StopReason", "ToolCostSpent",
+    "InvestigationResult", "RESOURCE_STOP_REASONS",
     "InvestigationProfile", "PolicyAction", "PolicyDecision", "RankedTool", "ToolEligibility",
     "ToolDefinition", "ToolExecutionRequest", "ToolExecutionResult",
     "ToolExecutionStatus", "ToolPriorityScore",
-    # risk
     "ConfidenceAssessment", "ConflictSeverity", "ConflictStatus", "ConflictType",
     "EvidenceConflict", "RiskAssessment", "RiskContribution", "Verdict",
-    # groq
     "GroqInvestigationRequest", "GroqReasoningResponse", "RequestedAction",
     "validate_referenced_evidence",
-    # report / audit
     "ForensicReport",
     "AuditEventType", "AuditRecord", "GENESIS_HASH", "compute_record_hash",
+    "URLCanonical", "URLCanonicalSet", "ProviderResult", "DomainIntelResult",
 ]
