@@ -126,7 +126,6 @@ def _check_no_candidate_tools(state: InvestigationState) -> Optional[StopDecisio
     """
     Stop if there are no available tools left and none have been scheduled.
 
-    NOTE: In Stage 1 the tools_available list is populated during initialization.
     An empty list at evaluation time means either all tools were consumed or
     none were applicable given the current investigation profiles.
     """
@@ -144,17 +143,23 @@ def _check_no_candidate_tools(state: InvestigationState) -> Optional[StopDecisio
     return None
 
 
-CONFIDENCE_TARGET = 0.85
-
 def _check_confidence_target(state: InvestigationState) -> Optional[StopDecision]:
-    """
-    Stop if current_confidence meets or exceeds confidence_target.
-    """
-    if state.current_confidence >= CONFIDENCE_TARGET:
+    from app.services.risk.sufficiency import EvidenceSufficiencyEvaluator, SufficiencyResult
+    
+    has_useful_tools = bool(state.tools_available)
+    # Check if budget is exhausted based on tool limits
+    from app.services.investigation.budget import calculate_budget_remaining
+    rem = calculate_budget_remaining(state)
+    budget_exhausted = (rem.max_tool_calls <= 0) or (rem.max_latency_ms <= 0)
+    
+    evaluator = EvidenceSufficiencyEvaluator()
+    res = evaluator.evaluate(state, has_useful_tools, budget_exhausted)
+    
+    if res == SufficiencyResult.SUFFICIENT:
         return StopDecision(
             should_stop=True,
             stop_reason=StopReason.CONFIDENCE_TARGET_REACHED,
-            explanation=f"Confidence {state.current_confidence:.2f} >= target {CONFIDENCE_TARGET:.2f}"
+            explanation=f"Sufficiency Evaluator determined SUFFICIENT evidence (conf={state.current_confidence:.2f})"
         )
     return None
 
@@ -163,13 +168,13 @@ def _check_confidence_target(state: InvestigationState) -> Optional[StopDecision
 # ---------------------------------------------------------------------------
 
 _STOP_EVALUATORS = [
-    # 1. Hard resource limits (cheapest to check first)
+    # 1. Risk-based stop (If we have enough evidence, stop normally even if out of budget)
+    _check_confidence_target,
+    # 2. Hard resource limits
     _check_max_iterations,
     _check_tool_call_budget,
     _check_latency_budget,
     _check_external_call_budget,
-    # 2. Risk-based stop
-    _check_confidence_target,
     # 3. Logical stops (require at least one iteration to be meaningful)
     _check_no_candidate_tools,
 ]

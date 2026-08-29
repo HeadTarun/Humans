@@ -46,8 +46,22 @@ def calculate_priority(
     calculated_cost = max(calculated_cost, 0.01)
     
     priority = (eig * tool_def.reliability * tool_def.availability_score) / calculated_cost
-    if relevance < 0.15:
+    
+    # If explicitly triggered, force a minimum relevance for priority calculation
+    is_triggered = False
+    for profile in profiles:
+        if tool_def.name in profile.mandatory_tools or tool_def.name in profile.optional_tools or tool_def.name in profile.expensive_tools:
+            for hyp in hypotheses:
+                if hyp.hypothesis_type == profile.hypothesis_type and getattr(hyp, "investigation_triggered", False):
+                    is_triggered = True
+                    break
+            if is_triggered:
+                break
+                
+    if relevance < 0.15 and not is_triggered:
         priority = 0.0
+    elif is_triggered and priority == 0.0:
+        priority = 0.01  # Provide a minimal priority to ensure it gets scheduled
     
     return ToolPriorityScore(
         tool_name=tool_def.name,

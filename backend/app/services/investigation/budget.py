@@ -18,6 +18,7 @@ from app.contracts.investigation import (
     InvestigationState,
     ToolCostSpent,
 )
+from app.core.config import settings
 
 # ---------------------------------------------------------------------------
 # Default budget — single source of truth
@@ -27,7 +28,7 @@ DEFAULT_BUDGET = InvestigationBudget(
     max_latency_ms=4000,
     max_tool_calls=8,
     max_external_calls=4,
-    max_llm_tokens=0,  # Stage 1: no LLM tokens allocated
+    max_llm_tokens=settings.MAX_LLM_TOKENS,
 )
 
 

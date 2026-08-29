@@ -111,7 +111,7 @@ class InvestigationDecisionEngine:
         - Updating risk/confidence scores
     """
 
-    def run_stage1(self, package: EmailEvidencePackage) -> Stage1Result:
+    def run_stage1(self, package: EmailEvidencePackage, original_case_id: str | None = None) -> Stage1Result:
         """
         Execute the complete Stage 1 investigation pass.
 
@@ -120,6 +120,7 @@ class InvestigationDecisionEngine:
 
         Parameters:
             package: Validated EmailEvidencePackage from the evidence normalizer.
+            original_case_id: Used during re-investigations to trace back to original case.
 
         Returns:
             Stage1Result containing the final state, facts, hypotheses,
@@ -128,7 +129,7 @@ class InvestigationDecisionEngine:
         # ------------------------------------------------------------------
         # 1. Initialize state
         # ------------------------------------------------------------------
-        state, l0_facts = init_state(package)
+        state, l0_facts = init_state(package, original_case_id=original_case_id)
         audit = AuditLogger(case_id=state.case_id)
         fact_ids = [f.evidence_id for f in l0_facts]
 
@@ -236,6 +237,11 @@ class InvestigationDecisionEngine:
                     for hop in package.headers.received_hops:
                         if hop.sender_ip:
                             inputs.append({"ip_address": hop.sender_ip})
+                    for ev in accumulated_evidence:
+                        if ev.type.value == "NETWORK" and ev.related_entity:
+                            if "." in ev.related_entity and not ev.related_entity.startswith("http"):
+                                inputs.append({"ip_address": ev.related_entity})
+
                 if tool_name in ["dns_resolver", "rdap_domain_lookup"]:
                     for url_item in package.urls:
                         import tldextract
@@ -243,6 +249,17 @@ class InvestigationDecisionEngine:
                         domain = f"{ext.domain}.{ext.suffix}" if ext.suffix else ext.domain
                         if domain:
                             inputs.append({"domain": domain})
+                    for ev in accumulated_evidence:
+                        if ev.type.value == "URL" and ev.related_entity:
+                            import tldextract
+                            ext = tldextract.extract(ev.related_entity)
+                            domain = f"{ext.domain}.{ext.suffix}" if ext.suffix else ext.domain
+                            if domain:
+                                inputs.append({"domain": domain})
+                        if ev.type.value == "NETWORK" and ev.related_entity:
+                            if any(c.isalpha() for c in ev.related_entity) and "." in ev.related_entity and not ev.related_entity.startswith("http"):
+                                inputs.append({"domain": ev.related_entity})
+
                 if tool_name == "sender_history":
                     if package.sender and package.sender.email_address:
                         inputs.append({"email_address": package.sender.email_address})
@@ -261,7 +278,7 @@ class InvestigationDecisionEngine:
 
             while iteration < MAX_ITERATIONS:
                 # 1. Re-evaluate Hypotheses & Policy
-                hypotheses = generate_initial_hypotheses(current_state, package)
+                hypotheses = generate_initial_hypotheses(current_state, package, accumulated_evidence)
                 active_profiles = select_profiles(hypotheses)
                 candidate_tools = get_candidate_tools(active_profiles, current_state.tools_used, current_state.tools_blocked)
                 
@@ -343,6 +360,13 @@ class InvestigationDecisionEngine:
                             pass
                 accumulated_evidence.extend(new_evidence)
                             
+                # Stage 7 Conflict Detection
+                from app.services.risk.conflict_engine import ConflictEngine
+                conflicts = ConflictEngine().detect_conflicts(accumulated_evidence)
+                current_state = current_state.model_copy(update={
+                    "active_conflicts": [c.model_dump() for c in conflicts]
+                })
+
                 # 8. Re-evaluate Risk
                 risk_result = risk_engine.assess(current_state, accumulated_evidence)
                 current_state = current_state.model_copy(update={
@@ -358,7 +382,12 @@ class InvestigationDecisionEngine:
             return current_state
             
         try:
-            loop = asyncio.get_event_loop()
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
             if loop.is_running():
                 import nest_asyncio
                 nest_asyncio.apply()

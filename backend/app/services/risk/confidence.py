@@ -55,52 +55,45 @@ _CONFIDENCE_FLOOR = 0.0
 
 def calculate_confidence(
     evidence_items: list[EvidenceItem],
-    pending_conflicts: list[str],
+    active_conflicts: list[dict] = None,
+    pending_conflicts: list[str] = None,
     tools_failed_count: int = 0,
     expected_evidence_count: int = _EXPECTED_L0_EVIDENCE_COUNT,
     case_id: str = "",
 ) -> ConfidenceAssessment:
-    """
-    Compute a ConfidenceAssessment from all available evidence signals.
+    if active_conflicts is None:
+        active_conflicts = []
+    if pending_conflicts is None:
+        pending_conflicts = []
 
-    Parameters
-    ----------
-    evidence_items : list[EvidenceItem]
-        All evidence items collected for this investigation so far.
-    pending_conflicts : list[str]
-        Unresolved EvidenceConflict IDs from InvestigationState.
-    tools_failed_count : int
-        Number of tools that timed out / failed (Stage 3+; pass 0 for Stage 2).
-    expected_evidence_count : int
-        How many evidence items represent "full coverage" for this level.
-    case_id : str
-        Case identifier for the ConfidenceAssessment contract.
-
-    Returns
-    -------
-    ConfidenceAssessment
-        Fully populated with all sub-factors for auditability.
-    """
     n_items = len(evidence_items)
-
-    # ---- 1. Completeness: how much of expected evidence do we have? ----
     completeness = min(1.0, n_items / max(expected_evidence_count, 1))
 
-    # ---- 2. Reliability: average confidence of evidence items ----
     if evidence_items:
         avg_reliability = sum(item.confidence for item in evidence_items) / n_items
     else:
         avg_reliability = 0.0
 
     # ---- 3. Conflict penalty: unresolved conflicts reduce confidence ----
-    # For Stage 2, all pending_conflicts are treated as MEDIUM severity
-    # (we don't have severity details without the full EvidenceConflict objects).
-    # Stage 3+ will pass severity-aware conflict objects.
-    conflict_penalty = min(
-        0.80,  # Never reduce confidence by more than 80% from conflicts alone
-        len(pending_conflicts) * _MEDIUM_CONFLICT_PENALTY,
-    )
+    conflict_penalty = 0.0
+    for conflict_dict in active_conflicts:
+        sev = conflict_dict.get("severity", "MEDIUM")
+        status = conflict_dict.get("status", "OPEN")
+        if status == "OPEN":
+            if sev == "HIGH":
+                conflict_penalty += _HIGH_CONFLICT_PENALTY
+            elif sev == "MEDIUM":
+                conflict_penalty += _MEDIUM_CONFLICT_PENALTY
+            elif sev == "LOW":
+                conflict_penalty += 0.03
+                
+    # Fallback to len(pending_conflicts) if no active_conflicts passed
+    if not active_conflicts and pending_conflicts:
+        conflict_penalty += len(pending_conflicts) * _MEDIUM_CONFLICT_PENALTY
+
+    conflict_penalty = min(0.80, conflict_penalty)
     conflict_factor = max(0.0, 1.0 - conflict_penalty)
+
 
     # ---- 4. Tool failure penalty ----
     failure_penalty = min(
@@ -109,9 +102,18 @@ def calculate_confidence(
     )
     failure_factor = max(0.0, 1.0 - failure_penalty)
 
-    # ---- 5. Final confidence ----
+    # ---- 5. Historical Cap (Part 14) ----
+    has_historical = any(e.key == "historical_exact_match" for e in evidence_items)
+    has_strong_current = any(e.key != "historical_exact_match" and e.confidence >= 0.8 for e in evidence_items)
+    
+    historical_cap = 1.0
+    if has_historical and not has_strong_current:
+        # If the only strong evidence is historical, cap confidence to 0.70
+        historical_cap = 0.70
+
+    # ---- 6. Final confidence ----
     raw_confidence = completeness * avg_reliability * conflict_factor * failure_factor
-    final_confidence = max(_CONFIDENCE_FLOOR, min(1.0, raw_confidence))
+    final_confidence = max(_CONFIDENCE_FLOOR, min(historical_cap, raw_confidence))
 
     return ConfidenceAssessment(
         case_id=case_id,

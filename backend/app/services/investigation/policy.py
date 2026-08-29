@@ -61,7 +61,7 @@ def select_profiles(
     selected: list[InvestigationProfile] = []
 
     for hyp in hypotheses:
-        if hyp.score >= RELEVANCE_FLOOR:
+        if hyp.score >= RELEVANCE_FLOOR or getattr(hyp, "investigation_triggered", False):
             profile = INVESTIGATION_PROFILES.get(hyp.hypothesis_type)
             if profile is not None:
                 selected.append(profile)

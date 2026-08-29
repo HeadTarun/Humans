@@ -68,6 +68,7 @@ class HypothesisRule:
     score_delta: float
     reason: str
     level: str = "L0"
+    triggers_investigation: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +306,7 @@ HYPOTHESIS_RULES: list[HypothesisRule] = [
         score_delta=0.10,
         reason="Email contains URL(s); malicious URL hypothesis activated for URL intelligence analysis",
         level="L0",
+        triggers_investigation=True,
     ),
     HypothesisRule(
         rule_id="URL_PRESENT_CREDENTIAL_PHISHING",
@@ -314,6 +316,7 @@ HYPOTHESIS_RULES: list[HypothesisRule] = [
         score_delta=0.10,
         reason="URL(s) present; credential phishing via malicious link is possible; URL analysis required",
         level="L0",
+        triggers_investigation=True,
     ),
     HypothesisRule(
         rule_id="URL_HTTP_SCHEME_PHISHING",

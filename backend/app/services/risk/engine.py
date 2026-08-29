@@ -136,9 +136,10 @@ class RiskEngine:
         # ----------------------------------------------------------------
         confidence_result = calculate_confidence(
             evidence_items=evidence_items,
+            active_conflicts=state.active_conflicts if hasattr(state, "active_conflicts") else [],
             pending_conflicts=state.pending_conflicts,
             tools_failed_count=tools_failed_count,
-            case_id=case_id,
+            case_id=state.case_id,
         )
         confidence = confidence_result.confidence_score
 

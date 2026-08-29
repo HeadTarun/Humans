@@ -55,7 +55,7 @@ from .threat_intel import (
     ThreatIntelResult,
     ThreatIntelVerdict,
 )
-from .historical import HistoricalMatch, MatchType
+from .historical import HistoricalMatch, MatchType, MatchStrength, HistoricalCorrelationResult
 from .correlation import CorrelationLink, CorrelationType
 from .investigation import (
     AttackHypothesis,
@@ -100,12 +100,15 @@ from .groq import (
     GroqReasoningResponse,
     RequestedAction,
     validate_referenced_evidence,
+    ReasoningInput,
+    ReasoningOutput,
 )
-from .report import ForensicReport
+from .report import ForensicReport, InvestigationReport
 from .audit import AuditEventType, AuditRecord, GENESIS_HASH, compute_record_hash
 from .url_canonical import URLCanonical, URLCanonicalSet
 from .provider_result import ProviderResult
 from .domain_intel import DomainIntelResult
+from .reinvestigation import ReinvestigationRequest, ReinvestigationResult
 
 __all__ = [
     "BaseContract", "CaseId", "ConflictId", "ContractError", "CorrelationId",
@@ -123,7 +126,7 @@ __all__ = [
     "HeaderFeatures", "HeaderPrediction", "ModelTask", "NLPAnalysisResult",
     "NLPLabel", "Prediction", "URLPrediction",
     "CacheStatus", "ThreatIntelProvider", "ThreatIntelResult", "ThreatIntelVerdict",
-    "HistoricalMatch", "MatchType",
+    "HistoricalMatch", "MatchType", "MatchStrength", "HistoricalCorrelationResult",
     "CorrelationLink", "CorrelationType",
     "AttackHypothesis", "AttackHypothesisType", "EscalationStatus",
     "HypothesisStatus", "InvestigationBudget", "InvestigationLevel",
@@ -136,8 +139,9 @@ __all__ = [
     "ConfidenceAssessment", "ConflictSeverity", "ConflictStatus", "ConflictType",
     "EvidenceConflict", "RiskAssessment", "RiskContribution", "Verdict",
     "GroqInvestigationRequest", "GroqReasoningResponse", "RequestedAction",
-    "validate_referenced_evidence",
-    "ForensicReport",
+    "validate_referenced_evidence", "ReasoningInput", "ReasoningOutput",
+    "ForensicReport", "InvestigationReport",
     "AuditEventType", "AuditRecord", "GENESIS_HASH", "compute_record_hash",
     "URLCanonical", "URLCanonicalSet", "ProviderResult", "DomainIntelResult",
+    "ReinvestigationRequest", "ReinvestigationResult",
 ]

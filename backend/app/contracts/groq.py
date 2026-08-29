@@ -30,11 +30,53 @@ class RequestedAction(str, Enum):
     EXPLANATION_ONLY = "EXPLANATION_ONLY"
 
 
+class EvidenceSnapshot(BaseContract):
+    facts: list[dict] = Field(default_factory=list)
+    heuristics: list[dict] = Field(default_factory=list)
+    ml_signals: list[dict] = Field(default_factory=list)
+    threat_intelligence: list[dict] = Field(default_factory=list)
+    historical_evidence: list[dict] = Field(default_factory=list)
+    inferences: list[dict] = Field(default_factory=list)
+    untrusted_email_content: list[dict] = Field(default_factory=list)
+    informational_risk_score: float | None = None
+    informational_confidence: float | None = None
+    informational_verdict: str | None = None
+    stop_reason: str | None = None
+
+    def compute_hash(self) -> str:
+        import hashlib
+        import json
+
+        def _canonicalize_list(data_list: list[dict]) -> list[dict]:
+            # Sort by evidence_id if available, otherwise serialize sort
+            return sorted(
+                [{k: v for k, v in d.items() if k not in ("timestamp", "created_at")} for d in data_list],
+                key=lambda x: str(x.get("evidence_id", json.dumps(x, sort_keys=True)))
+            )
+
+        canonical_data = {
+            "facts": _canonicalize_list(self.facts),
+            "heuristics": _canonicalize_list(self.heuristics),
+            "ml_signals": _canonicalize_list(self.ml_signals),
+            "threat_intelligence": _canonicalize_list(self.threat_intelligence),
+            "historical_evidence": _canonicalize_list(self.historical_evidence),
+            "inferences": _canonicalize_list(self.inferences),
+            "untrusted_email_content": _canonicalize_list(self.untrusted_email_content),
+            "informational_risk_score": self.informational_risk_score,
+            "informational_confidence": self.informational_confidence,
+            "informational_verdict": self.informational_verdict,
+            "stop_reason": self.stop_reason
+        }
+        
+        serialized = json.dumps(canonical_data, sort_keys=True)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 class GroqInvestigationRequest(BaseContract):
     case_id: CaseId
     task: str = Field(..., description="e.g. 'explain_risk', 'resolve_conflict', 'summarize_investigation'")
-    evidence_snapshot: list[dict] = Field(
-        ..., description="Serialized EvidenceItem dicts only — never raw email content (§24)"
+    evidence_snapshot: EvidenceSnapshot = Field(
+        ..., description="Controlled ReasoningContext / EvidenceSnapshot containing only necessary information"
     )
     hypotheses: list[dict] = Field(default_factory=list, description="Serialized AttackHypothesis dicts")
     unresolved_conflicts: list[dict] = Field(default_factory=list, description="Serialized EvidenceConflict dicts")
@@ -52,6 +94,8 @@ class GroqReasoningResponse(BaseContract):
     uncertainty: float = Field(..., ge=0.0, le=1.0)
     recommendation: str
     safety_flags: list[str] = Field(default_factory=list, description="e.g. 'possible_prompt_injection_in_source_email'")
+    total_tokens: int = Field(default=0, description="Total tokens used by LLM")
+
 
 
 def validate_referenced_evidence(
@@ -68,3 +112,8 @@ def validate_referenced_evidence(
         raise ValueError(
             f"GroqReasoningResponse references unknown evidence_ids {unknown}; response REJECTED per §25"
         )
+
+
+# Stage 6 aliases
+ReasoningInput = GroqInvestigationRequest
+ReasoningOutput = GroqReasoningResponse

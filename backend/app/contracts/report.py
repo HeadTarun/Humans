@@ -37,3 +37,6 @@ class ForensicReport(BaseContract):
     narrative: str = Field(..., description="Must only make claims traceable to evidence_ids, e.g. '...DMARC failed [EV-003]'")
     audit_reference: str = Field(..., description="Pointer to the AuditRecord chain / final hash_self for this case")
     generated_at: datetime = Field(default_factory=utcnow)
+
+
+InvestigationReport = ForensicReport

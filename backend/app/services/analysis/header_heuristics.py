@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import List
 
 from app.contracts.evidence import EvidenceItem, EvidenceType, EvidenceCategory, TrustLevel, EvidenceStatus
-from app.contracts.common import SourceType, Provenance
+from app.contracts.common import SourceType, Provenance, utcnow
 from app.services.evidence.models import EmailEvidencePackage, AuthProtocol
 
 class HeaderHeuristicAnalyzer:
@@ -14,7 +14,7 @@ class HeaderHeuristicAnalyzer:
 
     def analyze(self, package: EmailEvidencePackage) -> List[EvidenceItem]:
         evidence = []
-        now = datetime.utcnow()
+        now = utcnow()
 
         # 1. From / Reply-To Mismatch
         if package.sender and package.sender.reply_to_email:

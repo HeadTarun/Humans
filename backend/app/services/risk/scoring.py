@@ -69,6 +69,15 @@ EVIDENCE_WEIGHTS: dict[str, float] = {
     # ---- URL signals ----
     "url_http_scheme":              8.0,   # Non-HTTPS in email body
 
+    # ---- Stage 6: Historical signals ----
+    "historical_match_exact_hash": 65.0,
+    "historical_match_exact_url":  45.0,
+    "historical_match_exact_ip":   25.0,
+    "historical_match_exact_domain": 20.0,
+    
+    "deep_historical_correlation": 60.0,
+    "campaign_detected":           80.0,
+
     # ---- Future Stage 3 slots (placeholder — not yet active) ----
     # "url_reputation:malicious":    50.0,
     # "url_reputation:suspicious":   25.0,
@@ -117,10 +126,11 @@ def score_evidence_items(
         if key_specific in EVIDENCE_WEIGHTS:
             weight = EVIDENCE_WEIGHTS[key_specific]
             reason_key = key_specific
-        elif key_presence in EVIDENCE_WEIGHTS and val is True:
-            # Presence match: only fires when value is True (boolean)
-            weight = EVIDENCE_WEIGHTS[key_presence]
-            reason_key = key_presence
+        elif key_presence in EVIDENCE_WEIGHTS:
+            # Presence match: fires when value is True (boolean) OR when it's a complex dict (like HISTORICAL)
+            if val is True or isinstance(val, dict):
+                weight = EVIDENCE_WEIGHTS[key_presence]
+                reason_key = key_presence
 
         if weight is None:
             continue  # No weight defined for this evidence key/value

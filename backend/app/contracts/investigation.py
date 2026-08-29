@@ -74,7 +74,10 @@ class AttackHypothesis(BaseContract):
         default_factory=list,
         description="Human-readable rule reasons that contributed to this hypothesis score",
     )
-
+    investigation_triggered: bool = Field(
+        default=False,
+        description="True if an explicit rule mandates investigation regardless of score",
+    )
 
 # ---------------------------------------------------------------------------
 # Investigation Level — four-tier depth gate
@@ -230,6 +233,7 @@ class InvestigationState(BaseContract):
 
     # ---- Identity ----
     case_id: CaseId
+    original_case_id: Optional[CaseId] = None
     created_at: datetime = Field(default_factory=utcnow)
 
     # ---- Hypotheses ----
@@ -271,6 +275,7 @@ class InvestigationState(BaseContract):
         default_factory=list,
         description="EvidenceConflict.conflict_id values",
     )
+    active_conflicts: list[dict] = Field(default_factory=list, description="Serialized EvidenceConflict objects")
     resolved_conflicts: list[str] = Field(default_factory=list)
 
     # ---- Tool tracking ----

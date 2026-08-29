@@ -278,22 +278,17 @@ def _extract_l0_facts(
 # ---------------------------------------------------------------------------
 # Hypothesis generation
 # ---------------------------------------------------------------------------
-
 def generate_initial_hypotheses(
     state: InvestigationState,
     package: EmailEvidencePackage,
+    accumulated_evidence: list[EvidenceItem] = None,
 ) -> list[AttackHypothesis]:
-    """
-    Apply HYPOTHESIS_RULES deterministically to generate scored hypotheses.
-
-    Rules are evaluated in configuration order. Scores are additive and
-    capped at 1.0. The same input ALWAYS produces the same output (deterministic).
-
-    No LLM. No ML. No external calls. No random numbers.
-    """
-    # Initialize score accumulators and reason collectors
+    if accumulated_evidence is None:
+        accumulated_evidence = []
+        
     scores: dict[AttackHypothesisType, float] = {h: 0.0 for h in AttackHypothesisType}
     reasons: dict[AttackHypothesisType, list[str]] = {h: [] for h in AttackHypothesisType}
+    triggered: dict[AttackHypothesisType, bool] = {h: False for h in AttackHypothesisType}
 
     for rule in HYPOTHESIS_RULES:
         if not _rule_matches(package, rule):
@@ -301,10 +296,22 @@ def generate_initial_hypotheses(
         try:
             h_type = AttackHypothesisType(rule.target_hypothesis)
         except ValueError:
-            # Unknown hypothesis type — skip silently (registry validation prevents this)
             continue
         scores[h_type] = min(1.0, scores[h_type] + rule.score_delta)
         reasons[h_type].append(f"[{rule.rule_id}] {rule.reason}")
+        if getattr(rule, "triggers_investigation", False):
+            triggered[h_type] = True
+
+    # Dynamic Profile Expansion logic (Stage 7)
+    for ev in accumulated_evidence:
+        # Example: URL ML suspicious -> Boost Credential Phishing & Malware Delivery
+        if ev.key in ["url_ml_suspicious", "url_ml_phishing"] and float(ev.value) > 0.5:
+            scores[AttackHypothesisType.CREDENTIAL_PHISHING] = min(1.0, scores[AttackHypothesisType.CREDENTIAL_PHISHING] + 0.3)
+            reasons[AttackHypothesisType.CREDENTIAL_PHISHING].append("[dyn_url_ml] Suspicious URL found")
+        # Example: Historical exact match -> Boost Campaign
+        if ev.key == "historical_exact_match":
+            scores[AttackHypothesisType.CAMPAIGN] = min(1.0, scores[AttackHypothesisType.CAMPAIGN] + 0.45)
+            reasons[AttackHypothesisType.CAMPAIGN].append("[dyn_historical] Historical IOC correlation found")
 
     hypotheses: list[AttackHypothesis] = []
     for h_type, score in scores.items():
@@ -314,9 +321,10 @@ def generate_initial_hypotheses(
                 case_id=state.case_id,
                 hypothesis_type=h_type,
                 score=score,
-                confidence=0.0,  # Risk Engine sets confidence in Stage 2
+                confidence=0.0,
                 status=_score_to_status(score),
                 reasons=reasons[h_type],
+                investigation_triggered=triggered[h_type],
             )
         )
 
@@ -327,7 +335,7 @@ def generate_initial_hypotheses(
 # State initialization
 # ---------------------------------------------------------------------------
 
-def init_state(package: EmailEvidencePackage) -> InvestigationState:
+def init_state(package: EmailEvidencePackage, original_case_id: Optional[str] = None) -> tuple[InvestigationState, list[EvidenceItem]]:
     """
     Create the initial InvestigationState from a validated EmailEvidencePackage.
 
@@ -357,6 +365,7 @@ def init_state(package: EmailEvidencePackage) -> InvestigationState:
 
     state = InvestigationState(
         case_id=case_id,
+        original_case_id=original_case_id,
         created_at=utcnow(),
         attack_hypotheses=[],  # Populated after init via generate_initial_hypotheses
         observed_facts=fact_ids,
