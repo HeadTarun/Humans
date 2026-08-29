@@ -33,9 +33,9 @@ async def handle(
     
     start_time = time.perf_counter()
     try:
-        evidence_items = adapter.analyze(canonical_url, state.case_id)
+        evidence_item = adapter.analyze(canonical_url, state.case_id)
     except ModelFailureError as e:
         logger.error(f"URL ML failed: {e}")
         return {"error": str(e), "status": "failed"}
         
-    return evidence_items
+    return [evidence_item.model_dump(mode="json")] if evidence_item else []

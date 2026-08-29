@@ -159,7 +159,7 @@ class ToolExecutionResult(BaseContract):
     started_at: datetime
     completed_at: Optional[datetime] = None
     latency_ms: Optional[float] = Field(default=None, ge=0.0)
-    output: Optional[dict[str, Any]] = Field(
+    output: Optional[dict[str, Any] | list[Any]] = Field(
         default=None,
         description="Must validate against the tool's output_contract",
     )

@@ -53,5 +53,5 @@ async def handle(
         
     latency_ms = (time.perf_counter() - start_time) * 1000.0
     
-    # ToolExecutor can handle returning a list of EvidenceItem directly! Let's check this below.
-    return evidence_items
+    # Return as list of dicts for ToolExecutionResult validation
+    return [item.model_dump(mode="json") for item in evidence_items]

@@ -78,7 +78,12 @@ EVIDENCE_WEIGHTS: dict[str, float] = {
     "deep_historical_correlation": 60.0,
     "campaign_detected":           80.0,
 
-    # ---- Future Stage 3 slots (placeholder — not yet active) ----
+    # ---- Stage 3: ML and API signals ----
+    "url_ml_risk:MALICIOUS":       50.0,
+    "url_ml_risk:SUSPICIOUS":      25.0,
+    "url_ml_risk:BENIGN":         -10.0,
+
+    # ---- Future Stage 3 slots (placeholder - not yet active) ----
     # "url_reputation:malicious":    50.0,
     # "url_reputation:suspicious":   25.0,
     # "attachment_av_result:malicious": 55.0,

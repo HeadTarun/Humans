@@ -86,7 +86,7 @@ async def test_nlp_handler_direct():
             res = await nlp_handle(req, state, pkg)
             assert len(res) == 1
             from app.contracts.evidence import EvidenceType
-            assert res[0].type == EvidenceType.ML_SIGNAL
+            assert res[0]["type"] == EvidenceType.ML_SIGNAL
 
 @pytest.mark.asyncio
 async def test_url_handler_direct():
@@ -105,18 +105,18 @@ async def test_url_handler_direct():
         def analyze(self, url, case_id):
             from app.contracts.evidence import EvidenceItem, EvidenceType, EvidenceCategory, TrustLevel, EvidenceStatus
             from app.contracts.common import Provenance, SourceType
-            return [EvidenceItem(
+            return EvidenceItem(
                 evidence_id="2", case_id=case_id, type=EvidenceType.ML_SIGNAL, 
                 category=EvidenceCategory.URL, key="url_ml_risk", value=0.9, 
                 source="M4", source_type=SourceType.ML_MODEL, confidence=0.9,
                 trust_level=TrustLevel.VERIFIED, status=EvidenceStatus.ACTIVE,
                 provenance=Provenance(producer_module="url_adapter", extraction_method="model")
-            )]
+            )
     url_mod.URLModelAdapter = MockAdapter
     
     res = await url_handle(req, state, pkg)
     assert len(res) == 1
-    assert res[0].value == 0.9
+    assert res[0]["value"] == 0.9
 
 @pytest.mark.asyncio
 async def test_full_decision_engine_stage1_mocked():

@@ -359,7 +359,33 @@ class InvestigationDecisionEngine:
                         except Exception as e:
                             pass
                 accumulated_evidence.extend(new_evidence)
-                            
+                
+                # Update State with Evidence IDs
+                from app.contracts.evidence import EvidenceType
+                obs = list(current_state.observed_facts)
+                heu = list(current_state.heuristic_findings)
+                mls = list(current_state.ml_signals)
+                thi = list(current_state.threat_intelligence)
+                his = list(current_state.historical_matches)
+                for item in new_evidence:
+                    if item.type == EvidenceType.FACT:
+                        obs.append(item.evidence_id)
+                    elif item.type == EvidenceType.HEURISTIC:
+                        heu.append(item.evidence_id)
+                    elif item.type == EvidenceType.ML_SIGNAL:
+                        mls.append(item.evidence_id)
+                    elif item.type == EvidenceType.THREAT_INTEL:
+                        thi.append(item.evidence_id)
+                    elif item.type == EvidenceType.HISTORICAL:
+                        his.append(item.evidence_id)
+                current_state = current_state.model_copy(update={
+                    "observed_facts": obs,
+                    "heuristic_findings": heu,
+                    "ml_signals": mls,
+                    "threat_intelligence": thi,
+                    "historical_matches": his
+                })
+                
                 # Stage 7 Conflict Detection
                 from app.services.risk.conflict_engine import ConflictEngine
                 conflicts = ConflictEngine().detect_conflicts(accumulated_evidence)
