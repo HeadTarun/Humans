@@ -1,0 +1,25 @@
+# Secrets & local config — never bake into images
+.env
+.env.*
+!.env.example
+
+# Build/lint/test artifacts & local scratch files
+__pycache__/
+*.py[cod]
+.venv*/
+venv/
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# Large or non-runtime files copied into the image
+*.zip
+ml_models/
+backend.zip
+log.txt
+output.txt
+temp_output.txt
+*.eml
+*.mmdb
+tests/

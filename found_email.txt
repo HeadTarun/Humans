@@ -1,0 +1,832 @@
+<USER_REQUEST>
+# Alembic Email Forensics Parser — Remaining Implementation Plan
+ 
+**Audience for this document:** an AI coding agent with repo access (read/write files,
+run shell commands, run pytest). Assume it has NO context beyond what is written here.
+Do not assume it will infer intent — every step below states the exact file, the exact
+change, and the exact command to verify it before moving to the next step.
+ 
+**Ground rules — read before doing anything:**
+ 
+1. Work through the tasks in order (A → B → C → D). Do not skip ahead. Each task ends
+   with a "Definition of Done" — do not mark a task complete until every item in that
+   list is literally true.
+2. Never claim a change works without running the verification command for it and
+   pasting the actual output. "This should work" is not a valid completion state.
+3. Touch only the files named in each task. If you believe a change outside that list
+   is required, STOP and write down why instead of making the edit.
+4. If a step is ambiguous or a file doesn't match what this document describes (e.g. a
+   function signature has changed since this was written), STOP, quote the actual
+   current file content, and ask a human before proceeding. Do not guess and continue.
+5. Do not delete or rewrite working code that isn't part of the task at hand.
+6. Every new function gets a docstring explaining WHY, not just what — this codebase's
+   existing convention (see `services/analysis/header_heuristics.py`,
+   `services/tools/handlers/ip_classifier.py`) is to explain the forensic reasoning
+   inline, not just describe mechanics. Follow that convention.
+7. The parser must never raise on malformed input. Every new function that parses
+   untrusted data (headers, attachments, HTML) must catch its own exceptions and
+   degrade to `None`/empty/"unknown" rather than propagating.
+---
+ 
+## Context: what is already done (do not redo this)
+ 
+These files have already been modified and manually verified against real test input.
+Read them before starting so you don't duplicate or conflict with this work:
+ 
+- `contracts/headers.py` — `ReceivedHop` now has `from_ip`, `by_ip`, `ip_classification`.
+  `HeaderSet` now has `raw_headers_all: dict[str, list[str]]` (lossless) alongside the
+  older `raw_headers: dict[str, str]` (first-value-only, kept for backward compat).
+- `services/ingestion/parser.py` — `parse_received_hop()` extracts IPs from Received
+  headers and classifies them (`public`/`private`/`loopback`/`link_local`/`multicast`/
+  `reserved`/`unspecified`/`unknown`). Header raw-value capture no longer comma-joins
+  repeated header names into one lossy string.
+- `services/analysis/header_heuristics.py` — added module-level `create_heuristic_evidence()`
+  and a cached `get_header_heuristics(package, case_id)` (keyed on package identity via
+  `WeakKeyDictionary`, since `EmailEvidencePackage` is a frozen/immutable contract).
+- `services/tools/handlers/spf_dkim_dmarc.py`, `header_parse.py` — updated to call
+  `get_header_heuristics()` instead of each instantiating its own `HeaderHeuristicAnalyzer`.
+- `services/evidence/htmlparser.py` — `URLRecord` gained `raw`, `location`, `tag`,
+  `attribute`, `is_obfuscated`, `link_mismatch`, `visible_domain`, `actual_domain`.
+  `_extract_urls()` now also reads `<iframe src>`, `<form action>`, `<object data>`,
+  `<embed src>`, `<script src>`, `<link href>`, inline `style="url(...)"`, `<style>`
+  blocks, and de-obfuscates `hxxp`/`[.]`/`(dot)`/`[:]`-style text. New
+  `_detect_link_mismatch()` flags when anchor text names one domain and `href` points
+  to another.
+**Known unresolved issue you are inheriting:** `services/tools/handlers/relay_reconstruction.py`
+currently contains a version that imports a function that does not exist yet:
+`from app.services.analysis.relay_reconstruction import reconstruct_relay_path`.
+Task A below creates that module. Until Task A is done, that handler is broken —
+do not run it or add it to any test suite until Task A's Definition of Done is met.
+ 
+---
+ 
+## Task A (BLOCKING — do this first): Relay path reconstruction
+ 
+### A.1 — Create `services/analysis/relay_reconstruction.py`
+ 
+This is a new file. Create it with exactly this content:
+ 
+```python
+"""
+services/analysis/relay_reconstruction.py
+ 
+Reconstructs a best-effort mail relay path from the Received-header chain
+already parsed by services/ingestion/parser.py, and surfaces STRUCTURAL
+anomalies in that chain (timestamp ordering, hop count).
+ 
+This module produces FACTS ONLY (per PS 26106 §6 — see header_heuristics.py
+for the same convention). It never labels an email suspicious/phishing; it
+only describes what the chain looks like. The decision engine, not this
+module, decides what an anomaly means.
+ 
+Input/output contract:
+    reconstruct_relay_path(received_hops: list[ReceivedHop]) -> RelayPath
+ 
+`ReceivedHop` (contracts/headers.py) is what the real parser populates —
+it has `from_ip` / `by_ip` (two separate optional IPs), not the single
+`ip_address` field that the older, still-unused `RelayHop` contract
+(contracts/relay.py) has. This function is the bridge between the two:
+it reads ReceivedHop and produces RelayHop/RelayPath.
+ 
+Hop ordering assumption (this matters — get it backwards and origin_ip
+will be wrong):
+    Received headers are prepended by each server as a message transits,
+    so the header nearest the TOP of the message is the MOST RECENT hop
+    (closest to final delivery), and the header nearest the BOTTOM is the
+    OLDEST hop (closest to the true origin). services/ingestion/parser.py
+    assigns hop_index in the order headers are read from the message
+    top-to-bottom, so:
+        hop_index 0        == most recent hop (last leg to recipient)
+        hop_index max       == oldest hop (first leg from origin)
+    Timestamps should therefore be monotonically NON-INCREASING as
+    hop_index increases. A violation of that is a `timestamp_regression`
+    anomaly.
+"""
+ 
+from __future__ import annotations
+ 
+from typing import Optional
+ 
+from app.contracts.headers import ReceivedHop
+from app.contracts.relay import RelayHop, RelayPath
+ 
+# Clock skew tolerance for timestamp-ordering checks. Real mail servers'
+# clocks are not perfectly synchronized; without tolerance, ordinary NTP
+# drift between two legitimate relays would be misreported as an anomaly.
+_CLOCK_SKEW_TOLERANCE_SECONDS = 120
+ 
+# IP classifications (see services/ingestion/parser.classify_ip) that mean
+# "not a real internet-routable endpoint" for the purposes of picking an
+# origin IP. Internal routing IDs (e.g. Gmail's 2002:-prefixed hop IDs)
+# fall under "private" per Python's ipaddress module and must not be
+# reported as the message's origin.
+_NON_ROUTABLE_CLASSIFICATIONS = {
+    "private", "loopback", "link_local", "multicast", "reserved", "unspecified", "unknown", None,
+}
+ 
+ 
+def _to_relay_hop(hop: ReceivedHop) -> RelayHop:
+    """Map a ReceivedHop (headers.py, has from_ip/by_ip) onto a RelayHop
+    (relay.py, has one ip_address). Prefer from_ip: it identifies the
+    sending endpoint of this hop, which is what matters for tracing a
+    chain back toward the origin. by_ip is a fallback only."""
+    ip_address = hop.from_ip or hop.by_ip
+    is_internal: Optional[bool] = None
+    if hop.ip_classification is not None:
+        is_internal = hop.ip_classification in _NON_ROUTABLE_CLASSIFICATIONS
+ 
+    return RelayHop(
+        hop_index=hop.hop_index,
+        received_from=hop.from_host,
+        received_by=hop.by_host,
+        timestamp=hop.timestamp,
+        ip_address=ip_address,
+        is_internal=is_internal,
+    )
+ 
+ 
+def _find_origin_ip(hops: list[RelayHop], original: list[ReceivedHop]) -> Optional[str]:
+    """
+    The origin candidate is the from_ip of the hop with the HIGHEST
+    hop_index (oldest, closest to the true sender) that has a "public"
+    ip_classification. We deliberately do NOT just take the last hop's
+    ip_address unconditionally — per the module docstring, internal
+    routing IDs must not be reported as the origin.
+ 
+    Falls back to the highest-index hop with ANY ip_address if no hop is
+    classified "public" (e.g. classification was unavailable) rather than
+    returning None outright, but this fallback is lower-confidence and
+    callers should treat it as such if they need to distinguish.
+    """
+    if not original:
+        return None
+ 
+    by_index = sorted(original, key=lambda h: h.hop_index, reverse=True)
+ 
+    for hop in by_index:
+        if hop.ip_classification == "public" and (hop.from_ip or hop.by_ip):
+            return hop.from_ip or hop.by_ip
+ 
+    for hop in by_index:
+        if hop.from_ip or hop.by_ip:
+            return hop.from_ip or hop.by_ip
+ 
+    return None
+ 
+ 
+def _detect_timestamp_regressions(original: list[ReceivedHop]) -> list[str]:
+    """
+    Returns a list of anomaly strings, one per detected regression, in the
+    form: "timestamp_regression:hop_<i>_after_hop_<i-1>"
+ 
+    A regression is when the hop further from the recipient (higher
+    hop_index, i.e. chronologically earlier) has a timestamp LATER than
+    the hop before it (lower hop_index, chronologically later) by more
+    than the clock-skew tolerance. That is backwards — an earlier leg of
+    the journey cannot have happened after a later leg — and is either a
+    forged/backdated header or a real clock-sync problem on a relay.
+    Either way it is worth surfacing as a fact; this function does not
+    decide which cause it is.
+    """
+    anomalies: list[str] = []
+    by_index = sorted(
+        [h for h in original if h.timestamp is not None],
+        key=lambda h: h.hop_index,
+    )
+    for i in range(1, len(by_index)):
+        earlier_leg = by_index[i]      # higher hop_index = chronologically earlier
+        later_leg = by_index[i - 1]    # lower hop_index = chronologically later
+        delta = (earlier_leg.timestamp - later_leg.timestamp).total_seconds()
+        if delta > _CLOCK_SKEW_TOLERANCE_SECONDS:
+            anomalies.append(
+                f"timestamp_regression:hop_{earlier_leg.hop_index}_after_hop_{later_leg.hop_index}"
+            )
+    return anomalies
+ 
+ 
+def reconstruct_relay_path(received_hops: list[ReceivedHop]) -> RelayPath:
+    """Build a RelayPath from the parser's ReceivedHop list. Never raises —
+    malformed/empty input yields an empty-but-valid RelayPath, because a
+    forensic pipeline must degrade gracefully rather than crash the whole
+    analysis over one unparseable email."""
+    if not received_hops:
+        return RelayPath(hops=[], hop_count=0, origin_ip=None, anomalies=[])
+ 
+    try:
+        relay_hops = [_to_relay_hop(h) for h in received_hops]
+        origin_ip = _find_origin_ip(relay_hops, received_hops)
+        anomalies = _detect_timestamp_regressions(received_hops)
+ 
+        if len(received_hops) < 2:
+            anomalies.append("too_few_hops")
+ 
+        return RelayPath(
+            hops=relay_hops,
+            hop_count=len(relay_hops),
+            origin_ip=origin_ip,
+            anomalies=anomalies,
+        )
+    except Exception:
+        # Forensic pipeline rule: a malformed hop must not crash the whole
+        # analysis. Degrade to an empty-but-valid result and let the
+        # missing data speak for itself downstream.
+        return RelayPath(hops=[], hop_count=0, origin_ip=None, anomalies=["relay_reconstruction_failed"])
+```
+ 
+### A.2 — Verify A.1 in isolation (no pydantic needed for the pure-logic parts)
+ 
+Run this exact script and confirm the output matches what's shown (this uses fake
+lightweight stand-ins so it runs even without your full dependency stack installed —
+if `pydantic` IS installed in your environment, skip straight to A.3 instead, which
+tests the real thing):
+ 
+```bash
+python3 - << 'EOF'
+from datetime import datetime, timedelta
+ 
+class FakeHop:
+    def __init__(self, hop_index, from_host=None, from_ip=None, by_host=None,
+                 by_ip=None, ip_classification=None, timestamp=None):
+        self.hop_index = hop_index
+        self.from_host = from_host
+        self.from_ip = from_ip
+        self.by_host = by_host
+        self.by_ip = by_ip
+        self.ip_classification = ip_classification
+        self.timestamp = timestamp
+ 
+# Simulate: hop 0 = most recent (internal delivery), hop 1 = origin (public)
+t0 = datetime(2026, 8, 31, 9, 42, 6)
+t1 = t0 - timedelta(seconds=5)
+ 
+hops = [
+    FakeHop(0, from_host=None, by_host="mx.internal", by_ip="10.0.0.5",
+            ip_classification="private", timestamp=t0),
+    FakeHop(1, from_host="mail-sor-f69.google.com", from_ip="209.85.220.69",
+            by_host="mx.google.com", ip_classification="public", timestamp=t1),
+]
+ 
+# Paste-test the pure logic functions directly (copy _find_origin_ip and
+# _detect_timestamp_regressions bodies here if you can't import the real
+# module yet due to missing pydantic).
+EOF
+```
+ 
+If your environment already has `pydantic` installed, just run the real thing:
+ 
+```bash
+python3 - << 'EOF'
+from app.contracts.headers import ReceivedHop
+from app.services.analysis.relay_reconstruction import reconstruct_relay_path
+from datetime import datetime, timedelta
+ 
+t0 = datetime(2026, 8, 31, 9, 42, 6)
+t1 = t0 - timedelta(seconds=5)
+ 
+hops = [
+    ReceivedHop(hop_index=0, by_host="mx.internal", by_ip="10.0.0.5",
+                ip_classification="private", raw_line="x", timestamp=t0),
+    ReceivedHop(hop_index=1, from_host="mail-sor-f69.google.com", from_ip="209.85.220.69",
+                by_host="mx.google.com", ip_classification="public", raw_line="y", timestamp=t1),
+]
+ 
+path = reconstruct_relay_path(hops)
+assert path.origin_ip == "209.85.220.69", f"expected 209.85.220.69, got {path.origin_ip}"
+assert path.hop_count == 2
+print("PASS:", path.origin_ip, path.anomalies)
+EOF
+```
+ 
+Expected: `PASS: 209.85.220.69 []` (empty anomalies list — two hops, no regression).
+ 
+Now test the anomaly cases — run this too:
+ 
+```bash
+python3 - << 'EOF'
+from app.contracts.headers import ReceivedHop
+from app.services.analysis.relay_reconstruction import reconstruct_relay_path
+from datetime import datetime, timedelta
+ 
+# Only one hop -> "too_few_hops"
+single = [ReceivedHop(hop_index=0, from_host="a.com", raw_line="x")]
+path = reconstruct_relay_path(single)
+assert "too_few_hops" in path.anomalies, path.anomalies
+ 
+# Backwards timestamps -> regression flagged
+t0 = datetime(2026, 8, 31, 9, 42, 6)
+backwards = [
+    ReceivedHop(hop_index=0, by_host="a", raw_line="x", timestamp=t0),
+    ReceivedHop(hop_index=1, from_host="b", raw_line="y", timestamp=t0 + timedelta(minutes=10)),
+]
+path = reconstruct_relay_path(backwards)
+assert any(a.startswith("timestamp_regression") for a in path.anomalies), path.anomalies
+ 
+# Empty input -> valid empty result, no crash
+path = reconstruct_relay_path([])
+assert path.hop_count == 0 and path.origin_ip is None and path.anomalies == []
+ 
+print("ALL PASS")
+EOF
+```
+ 
+Expected output: `ALL PASS`. If any assertion fails, STOP — do not proceed to A.3 — and
+report the actual `path.anomalies` / `path.origin_ip` values you got.
+ 
+### A.3 — Confirm the handler that already expects this module now works
+ 
+The file `services/tools/handlers/relay_reconstruction.py` should already contain
+(if it doesn't, this is a STOP condition — report the actual file content instead of
+overwriting it):
+ 
+```python
+from app.services.evidence.models import EmailEvidencePackage
+from app.services.analysis.header_heuristics import get_header_heuristics, create_heuristic_evidence
+from app.services.analysis.relay_reconstruction import reconstruct_relay_path
+ 
+async def handle(request, state, package=None) -> list[dict]:
+    evidence_items = get_header_heuristics(package, state.case_id)
+    filtered = [e for e in evidence_items if e.key == "suspicious_relay_structure"]
+ 
+    relay_path = reconstruct_relay_path(package.received_hops if package else [])
+    if relay_path.origin_ip:
+        filtered.append(
+            create_heuristic_evidence(
+                state.case_id,
+                key="relay_origin_ip",
+                value=relay_path.origin_ip,
+                confidence=0.9,
+                related_entity=relay_path.origin_ip,
+            )
+        )
+    for anomaly in relay_path.anomalies:
+        filtered.append(
+            create_heuristic_evidence(
+                state.case_id,
+                key="relay_anomaly",
+                value=anomaly,
+                confidence=0.6,
+            )
+        )
+ 
+    if not filtered:
+        filtered.append(
+            create_heuristic_evidence(
+                state.case_id,
+                key="relay_reconstruction_complete",
+                value=True,
+                confidence=0.0
+            )
+        )
+    return [e.model_dump(mode="json") for e in filtered]
+```
+ 
+Run: `python3 -m py_compile services/tools/handlers/relay_reconstruction.py`
+ 
+### A.4 — Remove the now-duplicated "too_few_hops" signal from header_heuristics.py
+ 
+`services/analysis/header_heuristics.py`'s `HeaderHeuristicAnalyzer.analyze()` currently
+emits `suspicious_relay_structure` / `too_few_hops` when `len(package.received_hops) < 2`.
+`reconstruct_relay_path()` now emits the same fact as `too_few_hops` in its own
+`anomalies` list. Keeping both means every thin-chain email produces two separate
+evidence items saying the same thing, which looks like two independent corroborating
+signals when it's actually one signal counted twice.
+ 
+Remove this block from `HeaderHeuristicAnalyzer.analyze()`:
+ 
+```python
+        # 4. Received-chain anomalies
+        if package.received_hops is not None:
+            if len(package.received_hops) < 2:
+                evidence.append(
+                    self._create_heuristic(
+                        case_id,
+                        key="suspicious_relay_structure",
+                        value="too_few_hops",
+                        confidence=0.6,
+                    )
+                )
+```
+ 
+After removing it, `services/tools/handlers/header_parse.py` no longer needs to check
+for the `suspicious_relay_structure` key at all — confirm it doesn't (it currently
+filters for `("from_replyto_mismatch", "message_id_domain_mismatch")` only, so no
+change should be needed there — just confirm).
+ 
+### Definition of Done for Task A
+ 
+- [ ] `services/analysis/relay_reconstruction.py` exists with the exact content above.
+- [ ] `python3 -m py_compile services/analysis/relay_reconstruction.py` succeeds.
+- [ ] The three assertions in A.2's second script all pass — pasted output shown.
+- [ ] `services/tools/handlers/relay_reconstruction.py` matches A.3 exactly (or you
+      have STOPPED and reported a mismatch instead of silently overwriting it).
+- [ ] The `too_few_hops` block is removed from `header_heuristics.py`, and
+      `python3 -m py_compile services/analysis/header_heuristics.py` still succeeds.
+- [ ] Grep confirms no other file still calls `analyzer._create_heuristic` on an
+      `analyzer` variable that no longer exists in a given file:
+      `grep -rn "_create_heuristic" services/tools/handlers/` — every remaining hit
+      must be on a locally-constructed analyzer instance, not a stale reference.
+---
+ 
+## Task B: Attachment forensics — magic-byte detection
+ 
+**Why:** `contracts/attachment.py`'s `AttachmentRef.is_executable_signature` field
+already exists but `services/ingestion/parser.py` never sets it — it's always `False`.
+There is currently no way to detect `invoice.pdf.exe` (declared/displayed as a PDF,
+actually an executable) anywhere in this codebase.
+ 
+### B.1 — Create `services/ingestion/file_signatures.py`
+ 
+```python
+"""
+services/ingestion/file_signatures.py
+ 
+Minimal magic-byte (file signature) detection for attachment forensics.
+Deliberately dependency-free: this repo's own rule (spec/task doc §23) is
+not to add a library merely because it's popular, and a signature table
+this small doesn't need `python-magic` or libmagic bindings, which would
+add a system-library dependency for ~15 signatures.
+ 
+This module answers ONE question: "what does the byte content actually
+look like", independent of what the filename/declared MIME type claims.
+It never executes, opens, or otherwise interprets the file beyond reading
+its leading bytes — per the parser's security rules (spec §21), untrusted
+attachments must never be executed.
+"""
+ 
+from __future__ import annotations
+ 
+from typing import Optional
+ 
+# (signature bytes, offset, label). Checked in order; first match wins.
+# Labels are intentionally coarse-grained categories, not exact formats —
+# this is for forensic sanity-checking, not a general file-type library.
+_SIGNATURES: list[tuple[bytes, int, str]] = [
+    (b"%PDF-", 0, "pdf"),
+    (b"MZ", 0, "windows_executable"),
+    (b"\x7fELF", 0, "linux_executable"),
+    (b"\xca\xfe\xba\xbe", 0, "macos_executable"),  # also matches Java class files
+    (b"\xfe\xed\xfa", 0, "macos_executable"),
+    (b"PK\x03\x04", 0, "zip_or_office_openxml"),   # docx/xlsx/pptx/zip/jar/apk
+    (b"PK\x05\x06", 0, "zip_or_office_openxml"),   # empty zip archive
+    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", 0, "ole2_legacy_office"),  # old .doc/.xls/.ppt
+    (b"\x89PNG\r\n\x1a\n", 0, "png"),
+    (b"\xff\xd8\xff", 0, "jpeg"),
+    (b"GIF87a", 0, "gif"),
+    (b"GIF89a", 0, "gif"),
+    (b"{\\rtf", 0, "rtf"),
+    (b"\x1f\x8b", 0, "gzip"),
+    (b"7z\xbc\xaf\x27\x1c", 0, "7zip"),
+    (b"Rar!\x1a\x07", 0, "rar"),
+    (b"#!", 0, "script_shebang"),
+]
+ 
+# Category groupings used for declared-vs-detected mismatch checks.
+_EXECUTABLE_CATEGORIES = {"windows_executable", "linux_executable", "macos_executable", "script_shebang"}
+_ARCHIVE_CATEGORIES = {"zip_or_office_openxml", "gzip", "7zip", "rar"}
+ 
+# Which detected categories are "expected" for a given file extension.
+# An extension not in this map is simply not checked for mismatch (we do
+# not want to invent false positives for formats we haven't modeled).
+_EXTENSION_EXPECTATIONS: dict[str, set[str]] = {
+    "pdf": {"pdf"},
+    "doc": {"ole2_legacy_office", "zip_or_office_openxml"},
+    "docx": {"zip_or_office_openxml"},
+    "xls": {"ole2_legacy_office"},
+    "xlsx": {"zip_or_office_openxml"},
+    "ppt": {"ole2_legacy_office"},
+    "pptx": {"zip_or_office_openxml"},
+    "png": {"png"},
+    "jpg": {"jpeg"},
+    "jpeg": {"jpeg"},
+    "gif": {"gif"},
+    "zip": _ARCHIVE_CATEGORIES,
+    "rtf": {"rtf"},
+}
+ 
+ 
+def detect_file_type(data: bytes) -> str:
+    """Returns a coarse type label based on leading bytes, or "unknown" if
+    nothing matches. Never raises: a truncated/empty payload just yields
+    "unknown" rather than an IndexError."""
+    if not data:
+        return "unknown"
+    for signature, offset, label in _SIGNATURES:
+        try:
+            if data[offset:offset + len(signature)] == signature:
+                return label
+        except Exception:
+            continue
+    return "unknown"
+ 
+ 
+def is_executable_type(detected_type: str) -> bool:
+    return detected_type in _EXECUTABLE_CATEGORIES
+ 
+ 
+def declared_extension(filename: str) -> Optional[str]:
+    """Last dotted suffix, lowercased, no dot. 'invoice.pdf.exe' -> 'exe'
+    (correctly the LAST extension — that's the one the OS/mail client
+    actually uses to decide how to open the file, which is exactly the
+    disguise this function needs to catch)."""
+    if not filename or "." not in filename:
+        return None
+    return filename.rsplit(".", 1)[-1].lower() or None
+ 
+ 
+def detect_extension_mismatch(filename: str, detected_type: str) -> bool:
+    """True when the file's last extension implies a category that the
+    actual byte signature contradicts. Returns False (no mismatch) when
+    the extension isn't one we have modeled expectations for, or when
+    detected_type is "unknown" — absence of a signature match is not
+    evidence of anything on its own."""
+    ext = declared_extension(filename)
+    if not ext or detected_type == "unknown":
+        return False
+    expected = _EXTENSION_EXPECTATIONS.get(ext)
+    if not expected:
+        return False
+    return detected_type not in expected
+```
+ 
+### B.2 — Verify B.1 in isolation
+ 
+```bash
+python3 - << 'EOF'
+import sys
+sys.path.insert(0, ".")
+from services.ingestion.file_signatures import (
+    detect_file_type, is_executable_type, detect_extension_mismatch, declared_extension
+)
+ 
+assert detect_file_type(b"%PDF-1.4 rest of file") == "pdf"
+assert detect_file_type(b"MZ\x90\x00 rest") == "windows_executable"
+assert detect_file_type(b"random garbage") == "unknown"
+assert detect_file_type(b"") == "unknown"
+ 
+assert is_executable_type("windows_executable") is True
+assert is_executable_type("pdf") is False
+ 
+assert declared_extension("invoice.pdf.exe") == "exe"
+assert declared_extension("noextension") is None
+ 
+# The canonical disguised-attachment case from the spec:
+mz_bytes = b"MZ\x90\x00\x03\x00\x00\x00"
+assert detect_extension_mismatch("invoice.pdf", detect_file_type(mz_bytes)) is True
+ 
+# A real PDF named .pdf must NOT be flagged:
+pdf_bytes = b"%PDF-1.7\n..."
+assert detect_extension_mismatch("invoice.pdf", detect_file_type(pdf_bytes)) is False
+ 
+# Unmodeled extension (.txt) must not be flagged even if bytes don't match anything:
+assert detect_extension_mismatch("notes.txt", detect_file_type(b"plain text")) is False
+ 
+print("ALL PASS")
+EOF
+```
+ 
+Expected: `ALL PASS`. If it fails, STOP and paste the actual failing assertion and
+what `detect_file_type(...)` actually returned.
+ 
+### B.3 — Modify `contracts/attachment.py`
+ 
+Add two fields to `AttachmentRef` (do not remove or rename any existing field):
+ 
+```python
+class AttachmentRef(BaseContract):
+    attachment_id: str
+    filename: str
+    mime_type: str
+    size_bytes: int
+    sha256: str
+    is_archive: bool = False
+    is_executable_signature: bool = False
+    detected_type: Optional[str] = Field(
+        default=None, description="Magic-byte category from file_signatures.detect_file_type; NOT the declared/claimed type"
+    )
+    extension_mismatch: bool = Field(
+        default=False, description="True when the filename's extension implies a category the actual byte signature contradicts (e.g. invoice.pdf.exe)"
+    )
+    extracted_text_reference: Optional[str] = Field(
+        default=None, description="Reference to extracted text/OCR content, not the raw attachment"
+    )
+```
+ 
+### B.4 — Modify `services/ingestion/parser.py`
+ 
+Add the import near the other imports at the top of the file:
+ 
+```python
+from app.services.ingestion.file_signatures import (
+    detect_file_type, is_executable_type, detect_extension_mismatch
+)
+```
+ 
+Then in the attachment-construction block (search for `attachments.append(AttachmentRef(`),
+replace:
+ 
+```python
+                attachments.append(AttachmentRef(
+                    attachment_id=uuid.uuid4().hex,
+                    filename=filename,
+                    mime_type=content_type,
+                    size_bytes=len(payload),
+                    sha256=part_sha256
+                ))
+```
+ 
+with:
+ 
+```python
+                detected_type = detect_file_type(payload)
+                attachments.append(AttachmentRef(
+                    attachment_id=uuid.uuid4().hex,
+                    filename=filename,
+                    mime_type=content_type,
+                    size_bytes=len(payload),
+                    sha256=part_sha256,
+                    detected_type=detected_type,
+                    is_executable_signature=is_executable_type(detected_type),
+                    extension_mismatch=detect_extension_mismatch(filename, detected_type),
+                    is_archive=detected_type in ("zip_or_office_openxml", "gzip", "7zip", "rar"),
+                ))
+```
+ 
+Note: this OVERWRITES the previous behavior of `is_archive` (which was likely always
+`False` too — confirm by checking whether `is_archive=` was ever set anywhere else in
+this file before making this change; `grep -n "is_archive" services/ingestion/parser.py`
+first. If it was already being set from somewhere else, do not clobber that — merge the
+two conditions instead of replacing).
+ 
+### Definition of Done for Task B
+ 
+- [ ] `services/ingestion/file_signatures.py` exists with the exact content above.
+- [ ] All assertions in B.2 pass — pasted output shown.
+- [ ] `contracts/attachment.py` has the two new fields, existing fields untouched.
+- [ ] `services/ingestion/parser.py` sets `detected_type`, `is_executable_signature`,
+      `extension_mismatch` on every constructed `AttachmentRef`.
+- [ ] `python3 -m py_compile contracts/attachment.py services/ingestion/parser.py
+      services/ingestion/file_signatures.py` succeeds.
+- [ ] You checked whether `is_archive` was already set elsewhere before overwriting it,
+      per the note above, and recorded what you found.
+---
+ 
+## Task C: Audit the parts of the repo nobody has reviewed yet
+ 
+Everything fixed so far (this doc's "Context" section) covers only
+`services/ingestion/`, `services/evidence/`, and `services/analysis/header_heuristics.py`.
+Nothing else in the repo — ML models, risk/decision scoring, the investigation state
+machine, reporting/evidence-export, the API layer, the database layer — has been
+inspected at all. Do not assume those are fine. Do not assume they are broken either.
+Find out and write it down.
+ 
+### C.1 — Procedure (follow exactly, for each directory listed in C.2)
+ 
+For each directory:
+ 
+1. Run `find <directory> -name "*.py" -not -path "*__pycache__*" | xargs wc -l | sort -n`
+   to see what exists and roughly how substantial each file is.
+2. Open every file over 30 lines. Skim files under 30 lines.
+3. For each file, answer in writing:
+   - What does this file actually do (one sentence, based on reading it — not the
+     module docstring, which may be aspirational)?
+   - Does it do what its docstring/the tool registry entry (if any) claims? Check
+     `services/investigation/tool_registry.py` for a matching `handler_ref` and
+     compare its `description`/`output_contract` against the real code, the same way
+     Task A's blocking issue was found (registry claimed `RelayPath` output; code
+     didn't produce one).
+   - Does it call any external network/API? (`grep -n "requests\.\|httpx\.\|aiohttp"`)
+     If yes, does it block the main parsing path, or is it properly separated as
+     enrichment per spec §22 (synchronous parsing vs. async enrichment)?
+   - Does it ever construct an evidence/verdict item that mixes a raw fact with an
+     interpretive label (e.g. a `confidence` field set based on "how bad this looks"
+     rather than "how sure we are this observation is correct")? This was the failure
+     mode found in `header_heuristics.py`'s `suspicious_relay_structure` — look for
+     the same pattern elsewhere.
+4. Record every finding in the exact table format below. Do not skip the "Already
+   Exists" or "Quality" columns even if the honest answer is "no" / "poor" — a table
+   with only positive findings is a sign you didn't look hard enough, not a sign the
+   code is good.
+### C.2 — Directories to audit, in this order
+ 
+1. `services/analysis/` (files other than `header_heuristics.py`, already covered):
+   `attachment_analyzer.py`, `auth_analyzer.py`, `header_analyzer.py`, `nlp_analyzer.py`,
+   `url_analyzer.py`
+2. `services/tools/handlers/` (files other than the three already covered):
+   everything else in that directory — likely includes `ip_classifier.py` (already
+   read once during the original audit, re-check for correctness, not just existence),
+   `dns_resolver.py`, `rdap_lookup.py`, `virustotal_lookup.py` or similar, and any ML
+   handlers.
+3. `services/investigation/` — the tool registry, policy engine, budget engine, and
+   whatever orchestrates calling the tools in what order.
+4. Whatever directory contains the decision engine / risk scoring (search
+   `grep -rln "risk_score\|decision_engine\|verdict" --include=*.py .` to find it if
+   the directory name isn't obvious).
+5. Whatever directory contains database models / repositories (search for
+   `sqlalchemy`, `Base`, or similar ORM base classes).
+6. The API layer (search for `FastAPI(`, `@app.` / `@router.` route decorators).
+### C.3 — Output format
+ 
+Produce one markdown table, same columns as the original Phase 1 audit:
+ 
+| Capability | Already Exists | Quality | Missing/Weak | Recommended Change | Priority |
+|---|---|---|---|---|---|
+ 
+P0 = required for correct investigation, P1 = important, P2 = enhancement. Every row
+must cite an actual file and, where feasible, a line number or function name — a row
+that says "the ML pipeline has issues" with no file reference is not acceptable; it
+must say "in `services/analysis/url_analyzer.py:XX`, function `Y`, ...".
+ 
+### Definition of Done for Task C
+ 
+- [ ] All six directories/areas in C.2 have been opened and read, not just listed.
+- [ ] A gap table exists with at least one row per file over 30 lines found in C.1 step 1.
+- [ ] Every row cites a specific file (and function/line where possible).
+- [ ] At least one explicit check was made per directory for the "external API blocking
+      sync parsing" pattern and the "fact/verdict mixing" pattern described in C.1 step 3.
+---
+ 
+## Task D: Test suite
+ 
+Do this LAST, after A, B, and C, so the tests reflect the actual current state of the
+code rather than needing rewrites as A/B land.
+ 
+### D.1 — Golden fixture
+ 
+Save the real email provided earlier in this project as
+`tests/fixtures/golden_google_zendesk.eml` (raw `.eml` text, headers + MIME body,
+exactly as received — do not modify it). This fixture has: multiple `Received` hops,
+`ARC-Seal`/`ARC-Message-Signature`/`ARC-Authentication-Results`, real
+`Authentication-Results` with `dkim=pass; spf=pass; dmarc=pass`, quoted-printable HTML,
+and a real anchor to `zendesk.com`. It is a CLEAN (non-phishing) fixture — use it to
+assert things are correctly recognized as legitimate, not as a phishing-detection test.
+ 
+### D.2 — Required test files (create these under `tests/`)
+ 
+- `tests/test_received_hop_ip_extraction.py` — asserts against the golden fixture:
+  the first hop's `from_ip` is `209.85.220.69` and its `ip_classification` is `"public"`.
+- `tests/test_relay_reconstruction.py` — the three scenarios already proven in A.2's
+  second script (normal chain, too-few-hops, timestamp regression, empty input),
+  written as real `pytest` test functions instead of inline assertions.
+- `tests/test_header_heuristics_cache.py` — construct one `EmailEvidencePackage`,
+  call `get_header_heuristics()` twice, assert the SAME list object is returned both
+  times (`is`, not `==`) to prove the cache is actually being hit and not just
+  producing equal-but-freshly-computed results.
+- `tests/test_html_link_mismatch.py` — the exact synthetic HTML case already verified
+  by hand: `<a href="https://evil-example.com/login">https://google.com</a>` must
+  produce a `URLRecord` with `link_mismatch=True`, `visible_domain="google.com"`,
+  `actual_domain="evil-example.com"`.
+- `tests/test_html_url_sources.py` — one HTML fixture containing an `<a>`, an
+  `<iframe src>`, a `<form action>`, and a CSS `url(...)`; assert all four appear in
+  `url_records` with the correct `location` value each.
+- `tests/test_attachment_signatures.py` — the exact assertions from B.2, as pytest
+  functions: a renamed executable (`MZ` bytes, `.pdf` filename) must produce
+  `extension_mismatch=True`; a real PDF named `.pdf` must produce `extension_mismatch=False`.
+- `tests/test_malformed_input.py` — feed the parser: an empty byte string, a truncated
+  MIME message cut off mid-boundary, and a message with a header containing a null byte.
+  Assert the parser returns a result with `parsing_status` reflecting the problem
+  (check `contracts/email.py` / wherever parse status is modeled) rather than raising
+  an unhandled exception.
+### D.3 — Run everything
+ 
+```bash
+pytest tests/ -v
+```
+ 
+Paste the full output. Every test must pass before this task is considered done. A
+test that is skipped or xfailed is not a passing test — if you cannot make a test
+pass, STOP and report which one and why, rather than marking it skip and moving on.
+ 
+### Definition of Done for Task D
+ 
+- [ ] All seven test files in D.2 exist.
+- [ ] `pytest tests/ -v` output is pasted in full and shows 0 failures, 0 errors.
+- [ ] No test uses `@pytest.mark.skip` or `xfail` to get to a green run.
+---
+ 
+## Final report format
+ 
+When all four tasks are done, produce this summary (same shape used earlier in this
+project — do not deviate from it):
+ 
+```
+FILES CREATED
+FILES MODIFIED
+FILES LEFT UNCHANGED (and why)
+WHY EACH CHANGE WAS REQUIRED
+CURRENT CAPABILITIES
+REMAINING GAPS (anything found in Task C not fixed in this pass)
+KNOWN LIMITATIONS
+TEST RESULTS (full pytest output)
+```
+ 
+Do not fabricate any line of this report. Every claim in it must be something you
+personally ran and observed in this session, not something you inferred should be true.
+ 
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-09-01T16:54:47+05:30.
+</ADDITIONAL_METADATA>
+<USER_SETTINGS_CHANGE>
+The user changed setting `Model Selection` from None to Gemini 3.1 Pro (High). No need to comment on this change if the user doesn't ask about it. If reporting what model you are, please use a human readable name instead of the exact string.
+</USER_SETTINGS_CHANGE>
+---
