@@ -32,7 +32,13 @@ async def handle(
     """
     if not package:
         return []
-        
+
+    # In demo mode, skip DB queries entirely — no previous cases to correlate.
+    from app.core.config import settings as _settings
+    if _settings.DEMO_MODE:
+        logger.info("DEMO_MODE: skipping historical correlation DB queries")
+        return []
+
     db = SessionLocal()
     repo = HistoricalRepository(db)
     

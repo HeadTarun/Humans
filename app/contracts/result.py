@@ -95,6 +95,27 @@ class ContentAnalysisSummary(BaseContract):
     unavailable_reason: Optional[str] = None
 
 
+class AnalysisLayerSummary(BaseContract):
+    """One intelligence layer's contribution to the overall investigation.
+
+    Five layers are produced:
+        header_analysis      — SPF/DKIM/DMARC, Received chain, sender anomalies
+        nlp_analysis         — phishing/BEC/social-engineering indicators
+        url_analysis         — suspicious URLs, domain features, ML signals
+        threat_intelligence  — IP/domain/URL reputation lookups
+        geolocation          — geographic metadata for source IPs
+    """
+
+    layer_id: str
+    layer_name: str
+    risk_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    status: str = "unavailable"  # "analyzed" | "unavailable" | "partial"
+    findings: list[str] = Field(default_factory=list)
+    evidence_ids: list[EvidenceId] = Field(default_factory=list)
+    explanation: str = ""
+
+
 class InvestigationResult(BaseContract):
     """
     Final investigation result — the contract returned by the API.
@@ -251,6 +272,21 @@ class InvestigationResult(BaseContract):
 
     # Audit trail
     audit_chain_last_hash: str
+
+    # Multi-layer intelligence correlation (Demo + production transparency)
+    # Each layer independently scores its evidence. The hypothesis summarises
+    # how layers collectively support the verdict.
+    analysis_layers: list[AnalysisLayerSummary] = Field(
+        default_factory=list,
+        description="Per-layer risk breakdown: header, NLP, URL, threat-intel, geolocation.",
+    )
+    investigation_hypothesis: Optional[str] = Field(
+        default=None,
+        description=(
+            "Deterministic, evidence-backed narrative hypothesis. "
+            "References the actual layers that contributed. Never fabricated."
+        ),
+    )
 
     # ----------------------------------------------------------------
     # Security invariants

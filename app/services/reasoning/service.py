@@ -175,27 +175,32 @@ class ReasoningService:
             )
 
         except Exception as e:
+            import traceback
+            full_traceback = traceback.format_exc()
             latency_ms = int((time.monotonic() - start_time) * 1000)
             category = self._classify_error(e)
 
             logger.warning(
-                "REASONING_LLM_FAILED case=%s category=%s latency_ms=%d error_type=%s",
+                "REASONING_LLM_FAILED case=%s category=%s latency_ms=%d error_type=%s\nTraceback:\n%s",
                 snapshot.case_id,
                 category.value,
                 latency_ms,
                 type(e).__name__,
+                full_traceback,
             )
 
             return ReasoningUnavailable(
                 category=category,
-                reason=f"LLM call failed: {type(e).__name__}",
+                reason=f"LLM call failed: {type(e).__name__} - {str(e)}",
                 request_correlation_id=correlation_id,
                 safe_diagnostic={
                     "model": self._model,
                     "latency_ms": str(latency_ms),
                     "error_type": type(e).__name__,
+                    "traceback": full_traceback[:500],
                 },
             )
+
 
         # Validate the result
         try:

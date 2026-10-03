@@ -173,7 +173,15 @@ class ReasoningEvidenceSnapshot(BaseContract):
         description="Email-derived text explicitly marked as untrusted data",
     )
 
+    # ---- User Query for Chatbot integration ----
+    user_query: Optional[str] = Field(
+        default=None,
+        max_length=1000,
+        description="Optional custom question from the user for the AI to address in its assessment.",
+    )
+
     def compute_hash(self) -> str:
+
         """Deterministic SHA-256 hash for audit/cache keying.
 
         Strips volatile fields (timestamps) and sorts for repeatability.

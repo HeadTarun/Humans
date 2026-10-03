@@ -39,11 +39,13 @@ from app.contracts.result import (
 )
 from app.contracts.risk import Verdict
 from app.services.investigation.decision_engine import Stage1Result
+from app.services.investigation.layer_builder import build_analysis_layers
 from app.services.investigation.state_machine import complete_investigation
 from app.services.risk.engine import RiskEngine
 
 # Reusable engine instance — stateless, safe to share
 _risk_engine = RiskEngine()
+
 
 
 def _geolocation_summaries(stage1: Stage1Result) -> list[GeoLocationSummary]:
@@ -209,7 +211,22 @@ def to_investigation_result(stage1: Stage1Result) -> InvestigationResult:
     audit_last_hash = stage1.audit_logger.last_hash
 
     # ----------------------------------------------------------------
-    # 5. Construct InvestigationResult
+    # 5. Build 5-layer intelligence correlation breakdown
+    # ----------------------------------------------------------------
+    _geo_summaries = _geolocation_summaries(stage1)
+    try:
+        _analysis_layers, _investigation_hypothesis = build_analysis_layers(
+            evidence=stage1.all_evidence,
+            geolocation=_geo_summaries,
+            risk_score=risk_score,
+            verdict=verdict,
+        )
+    except Exception:  # noqa: BLE001 — layer builder must never crash the pipeline
+        _analysis_layers = []
+        _investigation_hypothesis = None
+
+    # ----------------------------------------------------------------
+    # 6. Construct InvestigationResult
     #    (model_validators enforce security invariants)
     # ----------------------------------------------------------------
     return InvestigationResult(
@@ -235,7 +252,7 @@ def to_investigation_result(stage1: Stage1Result) -> InvestigationResult:
         ml_signals=list(state.ml_signals),
         threat_intelligence=list(state.threat_intelligence),
         historical_matches=list(state.historical_matches),
-        geolocation=_geolocation_summaries(stage1),
+        geolocation=_geo_summaries,
         content_analysis=_content_summary(stage1),
 
         # Hypotheses
@@ -257,4 +274,8 @@ def to_investigation_result(stage1: Stage1Result) -> InvestigationResult:
 
         # Audit
         audit_chain_last_hash=audit_last_hash,
+
+        # Multi-layer correlation
+        analysis_layers=_analysis_layers,
+        investigation_hypothesis=_investigation_hypothesis,
     )

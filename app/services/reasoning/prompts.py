@@ -113,6 +113,13 @@ def build_user_message(snapshot_dict: dict, untrusted_items: list[dict]) -> str:
             parts.append("</untrusted_evidence_text>")
             parts.append("")
 
-    parts.append("Analyze this investigation snapshot and provide your structured assessment.")
+    user_query = snapshot_dict.get("user_query")
+    if user_query:
+        parts.append("=== USER QUESTION ===")
+        parts.append(str(user_query))
+        parts.append("")
+        parts.append("Analyze this investigation snapshot. Address the USER QUESTION directly in your summary and explanation, while strictly adhering to the requested structured output format.")
+    else:
+        parts.append("Analyze this investigation snapshot and provide your structured assessment.")
 
     return "\n".join(parts)

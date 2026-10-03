@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     DEMO_MODE: bool = False
 
     # ----- Reasoning Layer (LangChain + Groq) -----
-    GROQ_REASONING_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_REASONING_MODEL: str = "meta-llama/llama-prompt-guard-2-22m"
     GROQ_REASONING_TIMEOUT_SECONDS: int = 30
     GROQ_REASONING_MAX_TOKENS: int = 2048
     REASONING_ENABLED: bool = True

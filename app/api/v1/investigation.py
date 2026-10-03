@@ -200,71 +200,75 @@ async def analyze_email(
         result = to_investigation_result(stage1_result)
 
         # ------------------------------------------------------------------
-        # Stage 5: Persistence (best-effort)
+        # Stage 5: Persistence (best-effort) — SKIPPED in demo mode
         # ------------------------------------------------------------------
+        from app.core.config import settings as _app_settings
         eml_sha256: Optional[str] = None
         eml_storage_path: Optional[str] = None
 
-        try:
-            from app.repositories.async_persistence import (
-                ASYNC_PERSISTENCE_ENABLED,
-                persist_investigation,
-            )
-            if ASYNC_PERSISTENCE_ENABLED:
-                await persist_investigation(
-                    result,
-                    stage1_result.all_evidence,
-                    stage1_result.audit_logger.records,
-                    user_id=user_id,
-                    tenant_id=tenant_id,
+        if not _app_settings.DEMO_MODE:
+            try:
+                from app.repositories.async_persistence import (
+                    ASYNC_PERSISTENCE_ENABLED,
+                    persist_investigation,
                 )
-            else:
-                from app.repositories.db import SessionLocal
-                from app.repositories.historical_repository import HistoricalRepository
-                with SessionLocal() as _session:
-                    HistoricalRepository(_session).save_investigation(
+                if ASYNC_PERSISTENCE_ENABLED:
+                    await persist_investigation(
                         result,
                         stage1_result.all_evidence,
                         stage1_result.audit_logger.records,
                         user_id=user_id,
                         tenant_id=tenant_id,
                     )
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "PERSISTENCE_FAILED case=%s type=%s detail=%s",
-                result.investigation_id,
-                type(exc).__name__,
-                exc,
-                exc_info=True,
-            )
-            # Do not swallow persistence errors. The UI/caller must know that the
-            # investigation was not saved successfully.
-            raise HTTPException(
-                status_code=500,
-                detail=f"Investigation completed but persistence failed: {exc}",
-            ) from exc
-
-        # ------------------------------------------------------------------
-        # Stage 6: Raw .eml upload to Supabase Storage (best-effort)
-        # ------------------------------------------------------------------
-        try:
-            from app.integrations.eml_storage import eml_storage
-            if eml_storage.enabled:
-                eml_sha256 = await eml_storage.upload_eml(
-                    result.investigation_id, raw_bytes
+                else:
+                    from app.repositories.db import SessionLocal
+                    from app.repositories.historical_repository import HistoricalRepository
+                    with SessionLocal() as _session:
+                        HistoricalRepository(_session).save_investigation(
+                            result,
+                            stage1_result.all_evidence,
+                            stage1_result.audit_logger.records,
+                            user_id=user_id,
+                            tenant_id=tenant_id,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "PERSISTENCE_FAILED case=%s type=%s detail=%s",
+                    result.investigation_id,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
                 )
-                if eml_sha256:
-                    eml_storage_path = eml_storage.storage_path(result.investigation_id)
-                    # Patch the persisted case record with storage metadata
-                    _patch_case_eml_fields(
-                        result.investigation_id, eml_sha256, eml_storage_path
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Investigation completed but persistence failed: {exc}",
+                ) from exc
+
+            # ------------------------------------------------------------------
+            # Stage 6: Raw .eml upload to Supabase Storage (best-effort)
+            # ------------------------------------------------------------------
+            try:
+                from app.integrations.eml_storage import eml_storage
+                if eml_storage.enabled:
+                    eml_sha256 = await eml_storage.upload_eml(
+                        result.investigation_id, raw_bytes
                     )
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "EML_STORAGE_FAILED case=%s type=%s detail=%s",
+                    if eml_sha256:
+                        eml_storage_path = eml_storage.storage_path(result.investigation_id)
+                        _patch_case_eml_fields(
+                            result.investigation_id, eml_sha256, eml_storage_path
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "EML_STORAGE_FAILED case=%s type=%s detail=%s",
+                    result.investigation_id,
+                    type(exc).__name__,
+                    exc,
+                )
+        else:
+            logger.info(
+                "DEMO_MODE: skipping persistence and EML storage for case=%s",
                 result.investigation_id,
-                type(exc).__name__,
-                exc,
             )
 
         return result
@@ -632,6 +636,14 @@ async def reinvestigate(
       - Full investigation pipeline is re-executed from scratch.
     """
     request_started = time.perf_counter()
+
+    # Demo mode: no previous cases exist, reinvestigation is not applicable.
+    from app.core.config import settings as _app_settings
+    if _app_settings.DEMO_MODE:
+        raise HTTPException(
+            status_code=404,
+            detail="Reinvestigation is not available in demo mode (no persisted cases)",
+        )
 
     # Validate the .eml upload
     MAX_UPLOAD_BYTES = 10_000_000
@@ -1185,6 +1197,137 @@ from app.services.reasoning.service import ReasoningService as _ReasoningService
 _reasoning_service = _ReasoningServiceClass()
 
 
+async def _demo_reasoning(investigation_id: str, request: Request, app_settings) -> dict:
+    """Demo mode reasoning — builds snapshot from request body, no DB required.
+
+    The frontend sends a lightweight context object containing the fields
+    already present in the InvestigationResult (risk_score, confidence,
+    verdict, risk_reasons, analysis_layers, tools_used).
+    """
+    import json, time as _time, uuid
+    from app.contracts.reasoning import (
+        BudgetStatus, ReasoningEvidenceSnapshot, ReasoningFinding,
+        ReasoningHypothesis, UntrustedContentItem, ReasoningUnavailable,
+    )
+    from app.contracts.investigation import InvestigationLevel
+
+    # --- Parse optional body ---
+    ctx: dict = {}
+    try:
+        body_bytes = await request.body()
+        if body_bytes:
+            ctx = json.loads(body_bytes)
+    except Exception:
+        pass
+
+    risk_score: float = float(ctx.get("risk_score", 50.0))
+    confidence: float = float(ctx.get("confidence", 0.5))
+    verdict: str = str(ctx.get("verdict", "INCONCLUSIVE"))
+    risk_reasons: list = ctx.get("risk_reasons", [])
+    tools_used: list = ctx.get("tools_used", [])
+    analysis_layers: list = ctx.get("analysis_layers", [])
+    hypothesis: str = ctx.get("investigation_hypothesis", "")
+    user_query: str | None = ctx.get("user_query")
+
+    # --- Build typed key_findings from risk_reasons + layer findings ---
+
+    key_findings: list[ReasoningFinding] = []
+    for i, reason in enumerate(risk_reasons[:20]):
+        key_findings.append(ReasoningFinding(
+            evidence_id=f"DEMO-RSN-{i:03d}",
+            type="HEURISTIC",
+            category="AUTHENTICATION",
+            key=f"risk_reason_{i}",
+            value=reason,
+            source="deterministic_pipeline",
+            confidence=0.85,
+        ))
+
+    for layer in analysis_layers[:5]:
+        for j, finding in enumerate(layer.get("findings", [])[:3]):
+            key_findings.append(ReasoningFinding(
+                evidence_id=f"DEMO-LYR-{layer.get('layer_id', 'x')}-{j}",
+                type="HEURISTIC",
+                category=layer.get("layer_id", "HEADER").upper(),
+                key=f"{layer.get('layer_id', 'layer')}_finding",
+                value=finding,
+                source=layer.get("layer_name", "Analysis Layer"),
+                confidence=float(layer.get("confidence", 0.8)),
+            ))
+
+    # --- Hypothesis as an untrusted content item (treated as data) ---
+    untrusted: list[UntrustedContentItem] = []
+    if hypothesis:
+        untrusted.append(UntrustedContentItem(
+            evidence_id="DEMO-HYP-001",
+            content_type="investigation_hypothesis",
+            text=hypothesis[:500],
+        ))
+
+    # --- Minimal hypotheses from attack patterns in risk reasons ---
+    hypotheses: list[ReasoningHypothesis] = []
+    if verdict in ("MALICIOUS", "SUSPICIOUS"):
+        hypotheses.append(ReasoningHypothesis(
+            hypothesis_type="credential_phishing",
+            score=min(1.0, risk_score / 100.0),
+            status="SUPPORTED" if verdict == "MALICIOUS" else "UNCERTAIN",
+            reasons=risk_reasons[:5],
+            supporting_evidence_ids=[f"DEMO-RSN-{i:03d}" for i in range(min(3, len(risk_reasons)))],
+            contradicting_evidence_ids=[],
+        ))
+
+    snapshot = ReasoningEvidenceSnapshot(
+        case_id=investigation_id,
+        investigation_id=investigation_id,
+        investigation_level=InvestigationLevel.L2_DEEP.value,
+        current_risk=risk_score,
+        current_confidence=confidence,
+        key_findings=key_findings[:50],
+        current_hypotheses=hypotheses,
+        missing_evidence=[],
+        completed_tools=tools_used[:15],
+        failed_tools=[],
+        budget_status=BudgetStatus.AVAILABLE,
+        supporting_evidence=[f"DEMO-RSN-{i:03d}" for i in range(min(3, len(risk_reasons)))],
+        contradictory_evidence=[],
+        historical_context=f"Demo mode investigation. Verdict: {verdict}. Risk: {risk_score:.1f}/100.",
+        untrusted_content=untrusted,
+        user_query=user_query,
+    )
+
+    correlation_id = str(uuid.uuid4())
+    _start = _time.monotonic()
+
+    result = await _reasoning_service.reason(snapshot)
+
+    _latency_ms = int((_time.monotonic() - _start) * 1000)
+
+    if isinstance(result, ReasoningUnavailable):
+        return {
+            "investigation_id": investigation_id,
+            "reasoning_status": "unavailable",
+            "reason": result.reason,
+            "category": result.category.value,
+            "correlation_id": correlation_id,
+        }
+
+    artifact = _reasoning_service.build_artifact(result, snapshot.compute_hash())
+    return {
+        "investigation_id": investigation_id,
+        "reasoning_status": "available",
+        "reasoning_result": result.model_dump(mode="json"),
+        "artifact": {
+            "source_type": artifact.source_type,
+            "model": artifact.model,
+            "prompt_version": artifact.prompt_version,
+            "snapshot_hash": artifact.snapshot_hash[:32],
+            "timestamp": artifact.timestamp.isoformat(),
+            "validation_status": artifact.validation_status,
+        },
+    }
+
+
+
 @router.post(
     "/{investigation_id}/reason",
     summary="Request reasoning analysis for an investigation",
@@ -1225,6 +1368,12 @@ async def request_reasoning(
             "reason": "Reasoning layer is disabled",
             "category": "REASONING_DISABLED",
         }
+
+    # ----------------------------------------------------------------
+    # DEMO MODE FAST PATH — build snapshot from request body, skip DB
+    # ----------------------------------------------------------------
+    if app_settings.DEMO_MODE:
+        return await _demo_reasoning(investigation_id, request, app_settings)
 
     # --- Load the investigation from DB ---
     from app.repositories.db import SessionLocal
@@ -1340,7 +1489,20 @@ async def request_reasoning(
     from app.services.reasoning.snapshot_builder import build_reasoning_snapshot
 
     snapshot = build_reasoning_snapshot(state, evidence_store)
+
+    # Allow custom question from UI
+    try:
+        body_bytes = await request.body()
+        if body_bytes:
+            ctx = json.loads(body_bytes)
+            user_q = ctx.get("user_query")
+            if user_q:
+                snapshot.user_query = str(user_q)[:1000]
+    except Exception:
+        pass
+
     snapshot_hash = snapshot.compute_hash()
+
 
     # --- Audit: log attempt ---
     from app.services.investigation.audit_logger import AuditLogger
